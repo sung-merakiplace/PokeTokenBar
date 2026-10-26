@@ -1205,12 +1205,16 @@ final class CompanionStore {
     var shopEntries: [ShopEntry] {
         var entries: [ShopEntry] = purchasableItems.map { ShopEntry.item($0) }
         entries += FreshEgg.shopTiers.map { ShopEntry.egg($0) }
-        return entries.sorted { a, b in
+        entries.append(.chosenEgg)
+        // 같은 가격(기본 알·고르는 알)은 위 나열 순서를 지킨다.
+        return entries.enumerated().sorted { x, y in
+            let (a, b) = (x.element, y.element)
             let aDone = isPurchasedPassive(a)
             let bDone = isPurchasedPassive(b)
             if aDone != bDone { return !aDone }
-            return price(of: a) < price(of: b)
-        }
+            let (pa, pb) = (price(of: a), price(of: b))
+            return pa != pb ? pa < pb : x.offset < y.offset
+        }.map(\.element)
     }
 
     /// 구매 완료한 보유형(이로치 부적 등)인지 — shopEntries 정렬에서 맨 아래로 보낼 판정.
@@ -1279,6 +1283,16 @@ final class CompanionStore {
     func buyEgg(_ tier: Rarity?) -> Bool {
         guard canBuyEgg(tier) else { return false }
         state.spentTokens += price(of: .egg(tier))
+        releaseActive(eggTier: tier)
+        AppLog.write("egg purchased: discarded active, tier=\(tier?.rawValue ?? "none")")
+        Task { await self.ensureEggPrefetch() }   // 다음 부화 예열
+        save()
+        return true
+    }
+
+    /// 현재 포켓몬(또는 품던 알)을 놓아주고 처음부터 인큐베이션하는 새 알 상태로 되돌린다.
+    /// 알 구매와 파트너 선택이 공유한다. 놓아준 개체는 도감에 남는다.
+    private func releaseActive(eggTier tier: Rarity?) {
         if let a = state.active {
             state.dex.append(releasedDexEntry(from: a))   // 놓아줌 기록 — 도감에서 종이 사라지지 않게
         }
@@ -1293,10 +1307,77 @@ final class CompanionStore {
         state.eggTier = tier          // 등급 보증(nil = 보증 없음)
         state.pendingHatchID = nil    // 새 보증으로 처음부터 롤(활성 포켓몬이 있는 동안엔 원래 비어 있다)
         state.pendingForm = nil
+        state.pendingStartID = nil
         prefetchedLineID = nil
         justGraduated = nil; justEvolvedTo = nil; eventUntil = nil
-        AppLog.write("egg purchased: discarded active, tier=\(tier?.rawValue ?? "none")")
-        Task { await self.ensureEggPrefetch() }   // 다음 부화 예열
+    }
+
+    // MARK: 고르는 알
+
+    /// 고르는 알의 종 목록(1~5세대 전 종). 상점 카드가 열릴 때 한 번 불러온다.
+    private(set) var speciesCatalog: [CatalogSpecies] = []
+    private(set) var isLoadingCatalog = false
+    private var catalogByID: [Int: CatalogSpecies] = [:]
+
+    func loadSpeciesCatalog() async {
+        guard speciesCatalog.isEmpty, !isLoadingCatalog,
+              let catalogProvider = provider as? any SpeciesCatalogProviding else { return }
+        isLoadingCatalog = true
+        defer { isLoadingCatalog = false }
+        guard let entries = try? await catalogProvider.speciesCatalog() else {
+            AppLog.write("choice egg: species catalog unavailable")
+            return
+        }
+        speciesCatalog = entries.filter { PokemonAssets.hasAnimatedSprite(speciesID: $0.id) }
+        catalogByID = Dictionary(speciesCatalog.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    func catalogName(_ entry: CatalogSpecies) -> String {
+        state.language.resolveName(entry.names) ?? "#\(entry.id)"
+    }
+
+    func catalogName(speciesID: Int) -> String {
+        catalogByID[speciesID].map(catalogName) ?? "#\(speciesID)"
+    }
+
+    /// 번호(앞자리 일치, `#` 허용) 또는 아무 언어의 이름(대소문자·발음기호 무시 부분 일치)으로 찾는다.
+    func searchCatalog(_ query: String, limit: Int = 8) -> [CatalogSpecies] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        let digits = q.hasPrefix("#") ? String(q.dropFirst()) : q
+        if let n = Int(digits), n > 0 {
+            let prefix = String(n)
+            return Array(speciesCatalog.filter { String($0.id).hasPrefix(prefix) }
+                .sorted { ($0.id != n ? 1 : 0, $0.id) < ($1.id != n ? 1 : 0, $1.id) }
+                .prefix(limit))
+        }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return Array(speciesCatalog.filter { entry in
+            entry.names.values.contains { $0.range(of: q, options: options) != nil }
+        }.prefix(limit))
+    }
+
+    /// 지금 품은 알이 부화할 종(고르는 알로 정했을 때만).
+    var chosenEggSpeciesID: Int? { state.active == nil ? state.pendingStartID : nil }
+
+    /// 고르는 알을 살 수 있는가 — 기본 알과 같은 게이트(놓아줄 활성 개체 + 같은 가격).
+    var canBuyChosenEgg: Bool {
+        hasActive && availableTokens >= price(of: .chosenEgg)
+    }
+
+    /// 고르는 알 구매 — 기본 알처럼 현재 개체를 놓아주고(도감에 남음) 처음부터 인큐베이션하는 새 알로.
+    /// 다른 점은 부화할 종을 정해 둔다는 것뿐이다. 종 목록이 없으면 라인을 몰라 사지 않는다(토큰 보호).
+    @discardableResult
+    func buyChosenEgg(speciesID: Int) -> Bool {
+        guard canBuyChosenEgg, !isHatching,
+              let baseID = CatalogSpecies.baseID(of: speciesID, in: catalogByID) else { return false }
+        state.spentTokens += price(of: .chosenEgg)
+        releaseActive(eggTier: nil)
+        state.pendingHatchID = baseID
+        state.pendingStartID = speciesID
+        state.pendingForm = nil
+        AppLog.write("chosen egg purchased: \(speciesID) (line \(baseID))")
+        Task { await self.ensureEggPrefetch() }
         save()
         return true
     }
@@ -1464,7 +1545,8 @@ final class CompanionStore {
             return
         }
         let pendingForm = state.pendingHatchID == base ? state.pendingForm : nil
-        await hatchCore(baseID: base, generation: generation, form: pendingForm)
+        let startAt = state.pendingHatchID == base ? state.pendingStartID : nil
+        await hatchCore(baseID: base, generation: generation, form: pendingForm, startAt: startAt)
     }
 
     /// 부화가 폐기된 뒤 남은 개체(대개 방금 불러온 개체)의 진화 라인을 다시 로드한다.
@@ -1541,11 +1623,12 @@ final class CompanionStore {
         // 스프라이트 예열 — 부화 직후 보일 것들: base 정적+애니메이션, shiny 롤(1/64) 대비 shiny 애니메이션.
         // .app 번들에서만(단위 테스트가 실네트워크에 닿지 않도록 — 알림과 동일한 게이트).
         if AppEnv.isBundledApp {
-            _ = await SpriteStore.shared.data(speciesID: line.baseID, animated: false, shiny: false, form: form)
-            _ = await SpriteStore.shared.data(speciesID: line.baseID, animated: true, shiny: false, form: form)
-            _ = await SpriteStore.shared.data(speciesID: line.baseID, animated: true, shiny: true, form: form)
-            if PokemonForm.hasForms(speciesID: line.baseID) {
-                _ = await SpriteStore.shared.data(speciesID: line.baseID, animated: false, shiny: true, form: form)
+            let shownID = state.pendingStartID ?? line.baseID
+            _ = await SpriteStore.shared.data(speciesID: shownID, animated: false, shiny: false, form: form)
+            _ = await SpriteStore.shared.data(speciesID: shownID, animated: true, shiny: false, form: form)
+            _ = await SpriteStore.shared.data(speciesID: shownID, animated: true, shiny: true, form: form)
+            if PokemonForm.hasForms(speciesID: shownID) {
+                _ = await SpriteStore.shared.data(speciesID: shownID, animated: false, shiny: true, form: form)
             }
             await loadFormNames(baseID: line.baseID, form: form)
         }
@@ -1614,7 +1697,9 @@ final class CompanionStore {
     }
 
     /// 실제 부화 로직 — isHatching 락은 호출자(hatch / hatchIfNeeded)가 소유·해제한다.
-    private func hatchCore(baseID: Int, generation: Int, form pendingForm: PokemonForm? = nil) async {
+    /// `startAt` 이 있으면(고르는 알) base 대신 그 단계부터 시작한다 — 이전 단계는 이미 지난 것으로 본다.
+    private func hatchCore(baseID: Int, generation: Int, form pendingForm: PokemonForm? = nil,
+                           startAt: Int? = nil) async {
         let line: EvoLine
         do {
             line = try await provider.line(baseSpeciesID: baseID)
@@ -1638,6 +1723,7 @@ final class CompanionStore {
             AppLog.write("hatch: rolled \(line.rarity) below guaranteed \(tier) — discarded, re-roll next tick")
             state.pendingHatchID = nil
             state.pendingForm = nil
+            state.pendingStartID = nil
             prefetchedLineID = nil
             markHatchRetryDelayedIfReady(generation: generation)
             save()
@@ -1645,6 +1731,7 @@ final class CompanionStore {
         }
         state.pendingHatchID = nil
         state.pendingForm = nil
+        state.pendingStartID = nil
         // A later egg can roll the same species with another form and must warm its own sprite.
         prefetchedLineID = nil
         currentLine = line
@@ -1661,11 +1748,14 @@ final class CompanionStore {
         // 메타몽 위장 롤 — common·≥2형태에 한해 1/128. .app 게이트(&& 단락 → 비앱에선 rng 미소비로
         // 기존 테스트 RNG 시퀀스 무영향). 위장/리빌 로직은 상태 기반으로 별도 테스트한다.
         var dittoDisguise: Int?
-        if dittoDisguiseRollingEnabled,
+        if startAt == nil, dittoDisguiseRollingEnabled,
            Self.dittoDisguiseHit(rarity: line.rarity, totalForms: line.totalForms, roll: rng.next()) {
             dittoDisguise = line.baseID
         }
-        let evolutionPlan = makeEvolutionPlan(from: line.tree, baseID: line.baseID)
+        // 시작 단계까지의 경로는 고정하고, 그 뒤만 평소처럼 계획한다.
+        let startPath = startAt.flatMap { line.tree.path(to: $0) } ?? [line.baseID]
+        let startNode = line.tree.node(withID: startPath.last!) ?? line.tree
+        let evolutionPlan = Array(startPath.dropLast()) + makeEvolutionPlan(from: startNode, baseID: line.baseID)
         var profile = PokemonProfile.generate(seed: rng.next())
         if let details = pokemonDetailsByID[line.baseID] { profile.enrich(with: details) }
         let hasGrowthBoost = state.hasCollectedFinal(forBaseID: line.baseID)
@@ -1673,13 +1763,14 @@ final class CompanionStore {
         // 위장 중엔 이로치를 숨긴다 — 부화 알림·연출도 일반체로(정체는 리빌 때 공개).
         let showShiny = isShiny && dittoDisguise == nil
         activeGeneration += 1
-        state.active = MonState(baseID: line.baseID, pathIDs: [line.baseID], plannedPathIDs: evolutionPlan,
-                                stageIndex: 0, usedAtStage: 0, rarity: line.rarity, totalForms: evolutionPlan.count,
+        state.active = MonState(baseID: line.baseID, pathIDs: startPath, plannedPathIDs: evolutionPlan,
+                                stageIndex: startPath.count - 1, usedAtStage: 0, rarity: line.rarity, totalForms: evolutionPlan.count,
                                 isShiny: isShiny, nature: nature, profile: profile, hasGrowthBoost: hasGrowthBoost,
                                 dittoDisguise: dittoDisguise, form: form)
         AppLog.write("hatch: base=\(line.baseID) rarity=\(line.rarity) shiny=\(isShiny) forms=\(evolutionPlan.count) boost=\(hasGrowthBoost) ditto=\(dittoDisguise != nil)")
-        let name = formDisplayName(line.localizedName(line.baseID, state.language),
-                                   speciesID: line.baseID, form: form)
+        let startID = startPath.last ?? line.baseID
+        let name = formDisplayName(line.localizedName(startID, state.language),
+                                   speciesID: startID, form: form)
         notifyCompanionEvent(showShiny ? l.notifShinyHatchTitle : l.notifHatchTitle,
                              showShiny ? l.notifShinyHatchBody(name, odds: shinyOdds) : l.notifHatchBody(name))
         justEvolvedTo = nil        // 새 부화는 "성장" 문구(진화 아님) — 직전 진화명이 남아 표시되지 않게

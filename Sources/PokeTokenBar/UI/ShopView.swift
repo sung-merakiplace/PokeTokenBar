@@ -23,6 +23,8 @@ struct ShopView: View {
                         ShopItemCard(store: store, kind: kind)
                     case .egg(let tier):
                         EggCard(store: store, nav: nav, tier: tier)
+                    case .chosenEgg:
+                        ChosenEggCard(store: store, nav: nav)
                     }
                 }
             }
@@ -148,6 +150,158 @@ private struct ShopItemCard: View {
     private func buyNow() {
         confirming = false
         if store.buy(kind, count: selectedQuantity) { quantity = 1 }
+    }
+}
+
+/// 고르는 알 카드 — 기본 알과 같은 가격·같은 게이트. 구매를 누르면 검색으로 종을 고르고, 알 카드와
+/// 같은 인라인 확인(고가치 개체면 한 번 더)을 거쳐 그 종이 부화하는 새 알로 바꾼다.
+@MainActor
+private struct ChosenEggCard: View {
+    let store: CompanionStore
+    let nav: PopoverNavigation
+    @State private var stage: Stage = .idle
+    @State private var query = ""
+    private enum Stage: Equatable {
+        case idle, picking
+        case confirm(CatalogSpecies), preciousConfirm(CatalogSpecies)
+    }
+
+    private var price: Int { store.price(of: .chosenEgg) }
+
+    var body: some View {
+        let l = store.l
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                SpriteView(speciesID: nil, size: 26)
+                    .frame(width: 30, height: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(l.choiceEggName).font(.callout.weight(.semibold))
+                    Text(l.choiceEggDescription)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if store.hasActive {
+                        Text(l.eggReleaseNote)
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let chosen = store.chosenEggSpeciesID {
+                        Text(l.choiceEggHatchesInto(store.catalogName(speciesID: chosen)))
+                            .font(.caption2.weight(.semibold)).foregroundStyle(.green)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer()
+            }
+            controls(l)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .task { await store.loadSpeciesCatalog() }
+    }
+
+    @ViewBuilder
+    private func controls(_ l: L) -> some View {
+        switch stage {
+        case .idle:
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("\(l.shopPriceLabel) \(TokenFormatter.compact(price))")
+                        .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                    Spacer()
+                    if !store.hasActive {
+                        Button(l.buy) {}
+                            .buttonStyle(.bordered).controlSize(.small).disabled(true)
+                    } else if store.canBuyChosenEgg {
+                        Button(l.buy) { query = ""; stage = .picking }
+                            .buttonStyle(.bordered).controlSize(.small)
+                    } else {
+                        Text(l.notEnoughTokens).font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                if !store.hasActive {
+                    Text(l.eggShopLockedHint)
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        case .picking:
+            picker(l)
+        case .confirm(let pick):
+            HStack(spacing: 8) {
+                SpriteView(speciesID: pick.id, size: 24)
+                    .frame(width: 26, height: 26)
+                Text(l.choiceEggConfirm(store.displayName, store.catalogName(pick)))
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                Spacer()
+                Button(l.buy) {
+                    if store.isHighValueCompanion { stage = .preciousConfirm(pick) } else { commit(pick) }
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                Button(l.cancel) { stage = .picking }
+                    .buttonStyle(.borderless).controlSize(.small)
+            }
+        case .preciousConfirm(let pick):
+            HStack(spacing: 8) {
+                Text(store.rarity == .legendary ? l.freshEggLegendaryWarning : l.freshEggShinyWarning)
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.orange).lineLimit(2)
+                Spacer()
+                Button(store.currentIsShiny && store.rarity != .legendary ? l.freshEggDiscardShiny : l.freshEggDiscardValuable) { commit(pick) }
+                    .buttonStyle(.borderedProminent).controlSize(.small).tint(.orange)
+                Button(l.cancel) { stage = .idle }
+                    .buttonStyle(.borderless).controlSize(.small)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func picker(_ l: L) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if store.speciesCatalog.isEmpty {
+                HStack {
+                    if store.isLoadingCatalog {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(l.choiceEggCatalogFailed).font(.caption2).foregroundStyle(.orange)
+                        Spacer()
+                        Button(l.retry) { Task { await store.loadSpeciesCatalog() } }
+                            .buttonStyle(.bordered).controlSize(.small)
+                    }
+                    Spacer()
+                }
+            } else {
+                TextField(l.choiceEggSearchPrompt, text: $query)
+                    .textFieldStyle(.roundedBorder).controlSize(.small)
+                let results = store.searchCatalog(query)
+                if !query.trimmingCharacters(in: .whitespaces).isEmpty && results.isEmpty {
+                    Text(l.choiceEggNoMatch).font(.caption2).foregroundStyle(.tertiary)
+                }
+                ForEach(results, id: \.id) { entry in
+                    Button { stage = .confirm(entry) } label: {
+                        HStack(spacing: 8) {
+                            SpriteView(speciesID: entry.id, size: 24)
+                                .frame(width: 26, height: 26)
+                            Text(String(format: "#%03d", entry.id))
+                                .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                            Text(store.catalogName(entry)).font(.caption)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            HStack {
+                Spacer()
+                Button(l.cancel) { stage = .idle }
+                    .buttonStyle(.borderless).controlSize(.small)
+            }
+        }
+    }
+
+    /// 구매 → 새 알을 볼 수 있게 Home 으로 전환(알 카드와 같은 패턴).
+    private func commit(_ pick: CatalogSpecies) {
+        stage = .idle
+        if store.buyChosenEgg(speciesID: pick.id) { nav.tab = .home }
     }
 }
 

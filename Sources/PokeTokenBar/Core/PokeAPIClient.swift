@@ -21,9 +21,14 @@ protocol PokemonDetailProviding: Sendable {
     func pokemonDetails(speciesID: Int) async throws -> PokemonDetails
 }
 
+/// 고르는 알의 종 목록. `PokeProviding` 과 분리해 기존 테스트 더블을 그대로 둔다.
+protocol SpeciesCatalogProviding: Sendable {
+    func speciesCatalog() async throws -> [CatalogSpecies]
+}
+
 /// PokéAPI 클라이언트 — 종/진화체인을 런타임 fetch + 파싱. 포켓몬 데이터는 레포에 번들하지 않는다.
 /// species 응답은 actor 캐시(다국어 이름 재사용).
-actor PokeAPIClient: PokeProviding, PokemonDetailProviding {
+actor PokeAPIClient: PokeProviding, PokemonDetailProviding, SpeciesCatalogProviding {
     static let shared = PokeAPIClient()
     private let base = URL(string: "https://pokeapi.co/api/v2")!
     static var langCodes: [String] { AppLanguage.allCases.flatMap(\.apiCodes) }
@@ -116,6 +121,52 @@ actor PokeAPIClient: PokeProviding, PokemonDetailProviding {
         let line = EvoLine(baseID: baseSpeciesID, tree: tree, rarity: rarity, names: names)
         lineCache[baseSpeciesID] = line
         return line
+    }
+
+    // MARK: 종 목록 (고르는 알)
+
+    private var catalogCache: [CatalogSpecies]?
+    private static let catalogFile: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PokeTokenBar")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("species-catalog-v1.json")
+    }()
+    private struct GraphQLCatalogResponse: Decodable {
+        struct DataBox: Decodable { let pokemonspecies: [Row] }
+        struct Row: Decodable { let id: Int; let evolves_from_species_id: Int?; let pokemonspeciesnames: [NameDTO] }
+        let data: DataBox
+    }
+
+    /// 1~5세대 전 종(이름 + 진화 전 종) — GraphQL 1쿼리. 종 데이터는 바뀌지 않으므로 디스크 캐시에 TTL 이 없다.
+    func speciesCatalog() async throws -> [CatalogSpecies] {
+        if let catalogCache { return catalogCache }
+        if let data = try? Data(contentsOf: Self.catalogFile),
+           let disk = try? JSONDecoder().decode([CatalogSpecies].self, from: data), !disk.isEmpty {
+            catalogCache = disk
+            return disk
+        }
+        guard let url = URL(string: "https://graphql.pokeapi.co/v1beta2") else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 20
+        let maxID = PokemonAssets.animatedSpeciesIDs.upperBound
+        let query = "{ pokemonspecies(where: {id: {_lte: \(maxID)}}, order_by: {id: asc}) { id evolves_from_species_id pokemonspeciesnames { name language { name } } } }"
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        let rows = try JSONDecoder().decode(GraphQLCatalogResponse.self, from: data).data.pokemonspecies
+        let entries = rows.map {
+            CatalogSpecies(id: $0.id, parentID: $0.evolves_from_species_id,
+                           names: PokemonNameLocalization.collect($0.pokemonspeciesnames))
+        }
+        guard !entries.isEmpty else { throw URLError(.cannotParseResponse) }
+        catalogCache = entries
+        if let encoded = try? JSONEncoder().encode(entries) {
+            try? encoded.write(to: Self.catalogFile, options: .atomic)
+        }
+        return entries
     }
 
     // MARK: base 인덱스 (부화 후보)

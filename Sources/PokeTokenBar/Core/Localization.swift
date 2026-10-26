@@ -1513,6 +1513,57 @@ struct L {
     }
     /// 가방 사용 컨트롤의 효과 힌트 — 민트("성격 랜덤 변경", 사탕의 "+XP" 자리).
     var mintEffectHint: String { t("성격 랜덤 변경", "Random nature", "せいかくランダム変更", "Naturaleza aleatoria", "Nature aléatoire", "Natureza aleatória", "Zufälliges Wesen", "Случайный характер") }
+    // MARK: 고르는 알 (상점)
+    var choiceEggName: String {
+        t("포켓몬 알 (선택)", "Pokémon Egg (Choice)", "ポケモンのタマゴ（えらべる）", "Huevo Pokémon (a elegir)",
+          "Œuf Pokémon (au choix)", "Ovo Pokémon (à escolha)", "Pokémon-Ei (Wahl)", "Яйцо покемона (на выбор)")
+    }
+    var choiceEggDescription: String {
+        t("지금 포켓몬을 놓아주고, 직접 고른 포켓몬이 태어나는 새 알을 받아요.",
+          "Send off your current Pokémon for a new egg that hatches into the Pokémon you pick.",
+          "いまのポケモンを手放して、選んだポケモンが孵る新しいタマゴをもらいます。",
+          "Suelta a tu Pokémon actual por un huevo nuevo del que saldrá el Pokémon que elijas.",
+          "Laisse partir ton Pokémon actuel pour un nouvel œuf qui donnera le Pokémon de ton choix.",
+          "Solte seu Pokémon atual por um ovo novo que vai chocar o Pokémon que você escolher.",
+          "Verabschiede dein aktuelles Pokémon für ein neues Ei, aus dem das gewählte Pokémon schlüpft.",
+          "Отпустите текущего покемона ради нового яйца, из которого вылупится выбранный покемон.")
+    }
+    var choiceEggCatalogFailed: String {
+        t("포켓몬 목록을 불러오지 못했어요.", "Couldn't load the Pokémon list.", "ポケモンの一覧を読み込めませんでした。",
+          "No se pudo cargar la lista de Pokémon.", "Impossible de charger la liste des Pokémon.",
+          "Não foi possível carregar a lista de Pokémon.", "Pokémon-Liste konnte nicht geladen werden.",
+          "Не удалось загрузить список покемонов.")
+    }
+    var choiceEggSearchPrompt: String {
+        t("이름 또는 번호로 찾기", "Search by name or number", "名前か番号で検索", "Buscar por nombre o número",
+          "Rechercher par nom ou numéro", "Buscar por nome ou número", "Nach Name oder Nummer suchen", "Поиск по имени или номеру")
+    }
+    var choiceEggNoMatch: String {
+        t("찾는 포켓몬이 없어요.", "No matching Pokémon.", "該当するポケモンがいません。", "Ningún Pokémon coincide.",
+          "Aucun Pokémon correspondant.", "Nenhum Pokémon encontrado.", "Kein passendes Pokémon.", "Покемон не найден.")
+    }
+    func choiceEggHatchesInto(_ name: String) -> String {
+        t("지금 알에서 \(KoreanParticle.subject.attach(to: name)) 태어나요.",
+          "Your egg will hatch into \(name).",
+          "いまのタマゴから \(name) が孵ります。",
+          "Tu huevo eclosionará en \(name).",
+          "Votre œuf donnera \(name).",
+          "Seu ovo vai chocar \(name).",
+          "Aus deinem Ei schlüpft \(name).",
+          "Из яйца вылупится \(name).")
+    }
+    func choiceEggConfirm(_ monName: String, _ pickName: String) -> String {
+        t("\(KoreanParticle.object.attach(to: monName)) 놓아주고 \(KoreanParticle.subject.attach(to: pickName)) 태어나는 알로 바꿀까요?",
+          "Send off \(monName) for an egg that hatches into \(pickName)?",
+          "\(monName) を手放して、\(pickName) が孵るタマゴにしますか？",
+          "¿Soltar a \(monName) por un huevo del que saldrá \(pickName)?",
+          "Libérer \(monName) pour un œuf qui donnera \(pickName) ?",
+          "Soltar \(monName) por um ovo que vai chocar \(pickName)?",
+          "\(monName) freilassen für ein Ei, aus dem \(pickName) schlüpft?",
+          "Отпустить \(monName) ради яйца, из которого вылупится \(pickName)?")
+    }
+
+
 
     // MARK: 상점 (재화 = 사용한 토큰)
     var shop: String { t("상점", "Shop", "ショップ", "Tienda", "Boutique", "Loja", "Laden", "Магазин") }

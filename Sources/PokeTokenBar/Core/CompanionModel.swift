@@ -246,6 +246,25 @@ enum ShinyCharm {
     static let shinyDenominator: UInt64 = 48
 }
 
+/// 고르는 알의 종 목록 한 줄 — 지원 범위(1~5세대) 전 종. `parentID` 를 따라 올라가면 라인 시작점이 나온다.
+struct CatalogSpecies: Codable, Sendable, Hashable {
+    let id: Int
+    let parentID: Int?
+    /// langCode → name
+    let names: [String: String]
+
+    /// `id` 가 속한 진화 라인의 시작점. 목록에 없거나 순환이면 nil.
+    static func baseID(of id: Int, in catalog: [Int: CatalogSpecies]) -> Int? {
+        var current = id
+        for _ in 0..<8 {
+            guard let entry = catalog[current] else { return nil }
+            guard let parent = entry.parentID else { return current }
+            current = parent
+        }
+        return nil
+    }
+}
+
 /// 새 알(리롤) 밸런스 상수 — 상점 구매 시 현재 포켓몬을 폐기하고 새 알로 되돌린다.
 enum FreshEgg {
     /// 상점 구매가. 마음에 안 드는 부화를 리롤하는 프리미엄(쌓인 토큰의 활용처). 폐기 개체는 졸업이
@@ -273,16 +292,19 @@ enum FreshEgg {
 }
 
 /// 상점 표시 한 줄 — 판매 아이템(ItemKind) 또는 알 리롤(즉시 액션이라 ItemKind 가 아님).
-/// `egg` 의 연관값은 **보증 등급 하한**(nil = 보증 없는 기존 알).
+/// `egg` 의 연관값은 **보증 등급 하한**(nil = 보증 없는 기존 알). `chosenEgg` 는 부화할 종을 직접 고르는
+/// 알 — 기본 알과 같은 가격.
 /// CompanionStore.shopEntries 가 이 둘을 가격 오름차순으로 병합해 뷰가 단일 목록으로 그린다.
 enum ShopEntry: Hashable, Sendable {
     case item(ItemKind)
     case egg(Rarity?)
+    case chosenEgg
 
     var price: Int {
         switch self {
         case .item(let kind): return kind.shopPrice ?? 0
         case .egg(let tier): return FreshEgg.price(guaranteeing: tier)
+        case .chosenEgg: return FreshEgg.price
         }
     }
 }
@@ -335,6 +357,12 @@ struct EvoNode: Codable, Sendable {
     func node(withID id: Int) -> EvoNode? {
         if speciesID == id { return self }
         for c in children { if let f = c.node(withID: id) { return f } }
+        return nil
+    }
+    /// 이 노드에서 `id` 까지의 종 경로(자신 포함). 트리에 없으면 nil.
+    func path(to id: Int) -> [Int]? {
+        if speciesID == id { return [id] }
+        for c in children { if let p = c.path(to: id) { return [speciesID] + p } }
         return nil
     }
     /// 이 노드에서 도달 가능한 모든 최종체 id
@@ -647,6 +675,8 @@ struct CompanionState: Codable, Sendable {
     var pendingHatchID: Int?
     /// The form is chosen with the species so prefetch warms the exact sprite that will hatch.
     var pendingForm: PokemonForm?
+    /// 고르는 알로 정한 부화 종 — `pendingHatchID` 라인의 이 단계부터 시작한다. nil = 평소처럼 base 부터.
+    var pendingStartID: Int?
     /// 오늘 사용량 적립 기준값 — 프로바이더별로 독립 관리한다.
     ///
     /// `nil`은 aggregate `claimedTodayTokens`만 가지고 있던 구버전 세이브가 아직 첫 유효
@@ -693,6 +723,7 @@ struct CompanionState: Codable, Sendable {
         pendingHatchID     = c.lenientOptional(Int.self, forKey: .pendingHatchID)
         pendingForm        = PokemonForm.resolved(baseID: pendingHatchID ?? 0,
             form: PokemonForm.decoded(from: decoder, keys: "pendingForm", "pendingUnownForm"))
+        pendingStartID     = pendingHatchID == nil ? nil : c.lenientOptional(Int.self, forKey: .pendingStartID)
         if c.contains(.claimedTodayTokensByProvider) {
             claimedTodayTokensByProvider = c.lenient([String: Int].self,
                                                       forKey: .claimedTodayTokensByProvider,

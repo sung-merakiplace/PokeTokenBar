@@ -230,6 +230,7 @@ final class ShopTests: XCTestCase {
                        [.item(.mint),        // 100M
                         .item(.rareCandy),   // 500M
                         .egg(nil),           // 1B
+                        .chosenEgg,          // 1B (기본 알 다음)
                         .egg(.uncommon),     // 2.5B
                         .item(.shinyCharm),  // 3B
                         .egg(.rare)])        // 4B
@@ -247,6 +248,7 @@ final class ShopTests: XCTestCase {
                        [.item(.mint),        // 100M
                         .item(.rareCandy),   // 500M
                         .egg(nil),           // 1B
+                        .chosenEgg,          // 1B (기본 알 다음)
                         .egg(.uncommon),     // 2.5B
                         .item(.shinyCharm),  // 3B
                         .egg(.rare)])        // 4B
